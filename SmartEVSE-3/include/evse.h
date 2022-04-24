@@ -22,8 +22,12 @@
  */
 
 #ifndef __EVSE_MAIN
+
 #define __EVSE_MAIN
 
+#ifndef VERSION
+#define VERSION "v3serkri-0.00"
+#endif
 
 #define LOG_DEBUG 3                                                             // Debug messages including measurement data
 #define LOG_INFO 2                                                              // Information messages without measurement data
@@ -33,7 +37,7 @@
 #define LOG_EVSE LOG_INFO                                                       // Default: LOG_INFO
 #define LOG_MODBUS LOG_WARN                                                     // Default: LOG_WARN
 
-#define VERSION "3.00"         	                                                // SmartEVSE software version
+
 #define TRANSFORMER_COMP 100   
 
 
@@ -123,6 +127,7 @@
 #define RFID_READER 0
 #define WIFI_MODE 0
 #define AP_PASSWORD "00000000"
+#define USE_3PHASES 0
 
 
 // Mode settings
@@ -267,7 +272,8 @@
 #define MENU_EMCUSTOM_EDIVISOR 35                                               // 0x0217: Divisor for Energy (kWh) of custom electric meter (10^x)
 #define MENU_EMCUSTOM_READMAX 36                                                // 0x0218: Maximum register read (ToDo)
 #define MENU_WIFI 37                                                            // 0x0219: WiFi mode
-#define MENU_EXIT 38
+#define MENU_3F 38
+#define MENU_EXIT 39
 
 #define MENU_STATE 50
 
@@ -302,7 +308,8 @@
 #define EM_ABB 5
 #define EM_SOLAREDGE 6
 #define EM_WAGO 7
-#define EM_CUSTOM 8
+#define EM_API 8
+#define EM_CUSTOM 9
 
 #define ENDIANESS_LBF_LWF 0
 #define ENDIANESS_LBF_HWF 1
@@ -445,6 +452,7 @@ const struct {
     {"EMEDIV", "ENE DIVI","Divisor for Energy (kWh) of custom electric meter",  0, 7, EMCUSTOM_EDIVISOR},
     {"EMREAD", "READ MAX","Max register read at once of custom electric meter", 3, 255, 3},
     {"WIFI",   "WIFI",    "Connect to WiFi access point",                       0, 2, WIFI_MODE},
+    {"EV3P",   "3 PHASE",  "Can EV use 3 phases",                               0, 1, USE_3PHASES},
 
     {"EXIT", "EXIT", "EXIT", 0, 0, 0}
 };
@@ -481,6 +489,7 @@ void CheckAPpassword(void);
 void read_settings(bool write);
 void write_settings(void);
 void setSolarStopTimer(uint16_t Timer);
+void setState(uint8_t NewState, boolean forceState);
 void setState(uint8_t NewState);
 void setAccess(bool Access);
 uint8_t getMenuItems(void);

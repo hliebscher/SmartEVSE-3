@@ -1,0 +1,260 @@
+openapi: 3.0.3
+info:
+  title: Smart-EVSE V3A - Custom Firmware
+  version: 1.0.0
+servers:
+  - url: 'http://localhost'
+    description: 'Example Server'
+paths:
+  /settings:
+    get:
+      operationId: getSettings
+      tags:
+        - Operations
+      responses:
+        '200':
+          description: Operation OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode: 
+                    description: |-
+                      <b>0_OFF <br />
+                      <b>1_NORMAL <br />
+                      <b>2_SOLAR <br />
+                      <b>3_SMART
+                    type: string
+                    example: "2_SOLAR"
+                  mode_id:
+                    type: integer
+                  access: 
+                    type: integer
+                    minimum: 0
+                    maximum: 1
+                  temp: 
+                    type: integer
+                  evse:
+                    type: object
+                    properties:
+                      connected:
+                        type: boolean
+                      mode: 
+                        type: integer
+                      charge_timer:
+                        type: integer
+                      solar_stop_timer:
+                        type: integer
+                      state:
+                        type: string
+                      state_id:
+                        type: integer
+                      error:
+                        type: string
+                      error_id:
+                        type: integer
+                  settings:
+                    type: object
+                    properties:
+                      charge_current: 
+                        type: integer
+                      current_min: 
+                        type: integer
+                      current_max: 
+                        type: integer
+                      current_main: 
+                        type: integer
+                      solar_max_import: 
+                        type: integer
+                      solar_start_current: 
+                        type: integer
+                      solar_stop_time: 
+                        type: integer
+                      3phases_enabled: 
+                        type: boolean
+                  home_battery:
+                    type: object
+                    properties:
+                      current: 
+                        type: integer
+                      last_update: 
+                        type: integer
+                        example: 1647798299
+                  phase_currents:
+                    type: object
+                    properties:
+                      TOTAL:
+                        type: integer
+                      L1: 
+                        type: integer
+                      L2: 
+                        type: integer
+                      L3: 
+                        type: integer
+                      original_data:
+                        type: object
+                        properties:
+                          TOTAL:
+                            type: integer
+                          L1: 
+                            type: integer
+                          L2: 
+                            type: integer
+                          L3: 
+                            type: integer
+    post:
+      operationId: updateSettings
+      tags:
+        - Operations
+      parameters:
+        - in: query
+          name: mode
+          description: |-
+            Only following values are permitted: <br />
+              <b>0</b>: OFF <br />
+              <b>1</b>: NORMAL <br />
+              <b>2</b>: SOLAR <br />
+              <b>3</b>: SMART
+          required: false
+          schema:
+            type: integer
+        - in: query
+          name: disable_override_current
+          description: |-
+            If this parameter is passed the override current will be reset (value doesn't matter)
+          required: false
+          allowEmptyValue: true
+          schema:
+            type: integer
+        - in: query
+          name: override_current
+          description: |-
+            Works only when using <b>NORMAL</b> mode <br />
+            Desired current multiplied by 10 <br />
+            <br />
+            Examples: <br />
+            If the desired current is <b>8.3A</b> the value to be send is <b>83</b> <br />
+            If the desired current is <b>6A</b> the value to be send is <b>60</b>
+          required: false
+          schema:
+            type: integer
+        - in: query
+          name: enable_3phases
+          description: |-
+            Enables 3 phase mode by controlling a 2nd contactor (C2 port) <br /> <br />
+            Note 1: The 2nd contactor will only be turned <b>ON</b> when using the <b>NORMAL</b> mode and when state chages to 2 (Charging) <br />
+            Note 2: This is just changing the config setting, the contactor will not be controlled immedialty but only when there is a state change. <br />
+            <br />
+            If car is charging and you want to change from 1F to 3F:  <br />
+            - Change mode to OFF <br />
+            - Enable 3 phases <br />
+            - Change mode to NORMAL <br />
+          required: false
+          schema:
+            type: boolean
+        # - in: query
+        #   name: force_contactors
+        #   description: |-
+        #     Works only when using <b>NORMAL</b> mode and 3phases are enabled (using the EVSE menu or the enable_3phases parameter)<br />
+        #     Force contactor 2 to be opened/closed <br />
+        #   required: false
+        #   schema:
+        #     type: boolean
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Nullable'
+      responses:
+        '200':
+          description: Operation OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result: 
+                    type: string
+  /currents:
+    post:
+      operationId: updateCurrentsData
+      tags:
+        - Operations
+      parameters:
+        - in: query
+          name: battery_current
+          description: |-
+            Actual home battery current multiplied by 10 <br />
+            A <b>positive</b> number means the home battery is <b>charging</b> <br />
+            A <b>negative</b> number means the home battery is<b> discharging</b> <br />
+          required: false
+          schema:
+            type: integer
+        - in: query
+          name: L1
+          description: |-
+            Note: Only works when MainsMeter == API <br />
+            L1, L2 and L3 must be send all together otherwise the data won't be registered.<br />
+            Ampere must be multiplied by 10 <br />
+          required: false
+          schema:
+            type: integer
+        - in: query
+          name: L2
+          description: |-
+            Note: Only works when MainsMeter == API <br />
+            L1, L2 and L3 must be send all together otherwise the data won't be registered.<br />
+            Ampere must be multiplied by 10 <br />
+          required: false
+          schema:
+            type: integer
+        - in: query
+          name: L3
+          description: |-
+            Note: Only works when MainsMeter == API <br />
+            L1, L2 and L3 must be send all together otherwise the data won't be registered.<br />
+            Ampere must be multiplied by 10 <br />
+          required: false
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Nullable'
+      responses:
+        '200':
+          description: Operation OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result: 
+                    type: string
+  /reboot:
+    post:
+      operationId: rebootEvse
+      tags:
+        - Operations
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Nullable'
+      responses:
+        '200':
+          description: Operation OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result: 
+                    type: string
+components:
+  schemas:
+    Nullable:
+      type: object
+      nullable: true

@@ -1,8 +1,9 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <SPI.h>
 #include <Preferences.h>
 
-#include "FS.h"
+#include <FS.h>
 #include <SPIFFS.h>
 
 #include <WiFi.h>
@@ -12,28 +13,28 @@
 #include <ESPmDNS.h>
 #include <Update.h>
 
-#include "Logging.h"
-#include "ModbusServerRTU.h"        // Slave/node
-#include "ModbusClientRTU.h"        // Master
+#include <Logging.h>
+#include <ModbusServerRTU.h>        // Slave/node
+#include <ModbusClientRTU.h>        // Master
 
-#include "time.h"
+#include <time.h>
+
+#include <nvs_flash.h>              // nvs initialisation code (can be removed?)
+
+#include <soc/sens_reg.h>
+#include <soc/sens_struct.h>
+#include <driver/adc.h>
+#include <esp_adc_cal.h>
+
+#include <driver/uart.h>
+#include <soc/rtc_io_struct.h>
 
 #include "evse.h"
 #include "glcd.h"
 #include "utils.h"
 #include "OneWire.h"
 #include "modbus.h"
-#include "wifi.h"
 
-#include <nvs_flash.h>              // nvs initialisation code (can be removed?)
-
-#include <soc/sens_reg.h>
-#include <soc/sens_struct.h>
-#include "driver/adc.h"
-#include "esp_adc_cal.h"
-
-#include "driver/uart.h"
-#include "soc/rtc_io_struct.h"
 
 const char* NTP_SERVER = "europe.pool.ntp.org";        // only one server is supported
 
@@ -52,7 +53,7 @@ const char* TZ_INFO    = "CET-1CEST-2,M3.5.0/2,M10.5.0/3";      // Europe/Amster
 struct tm timeinfo;
 
 AsyncWebServer webServer(80);
-AsyncWebSocket ws("/ws");           // data to/from webpage
+//AsyncWebSocket ws("/ws");           // data to/from webpage
 DNSServer dnsServer;
 IPAddress localIp;
 String APhostname = "SmartEVSE-" + String( MacId() & 0xffff, 10);           // SmartEVSE access point Name = SmartEVSE-xxxxx
@@ -130,6 +131,8 @@ uint8_t RFIDReader = RFID_READER;                                           // R
 uint8_t WIFImode = WIFI_MODE;                                               // WiFi Mode (0:Disabled / 1:Enabled / 2:Start Portal)
 String APpassword = "00000000";
 
+boolean enable3f = USE_3PHASES;
+
 int32_t Irms[3]={0, 0, 0};                                                  // Momentary current per Phase (23 = 2.3A) (resolution 100mA)
                                                                             // Max 3 phases supported
 uint8_t State = STATE_A;
@@ -166,6 +169,7 @@ uint8_t lock1 = 0, lock2 = 1;
 uint8_t UnlockCable = 0, LockCable = 0;
 uint8_t timeout = 5;                                                        // communication timeout (sec)
 uint16_t BacklightTimer = 0;                                                // Backlight timer (sec)
+uint8_t BacklightSet = 0;
 uint32_t ChargeTimer = 0;                                                   // Counts seconds in STATE C (Charging) (unused)
 uint8_t LCDTimer = 0;
 uint8_t AccessTimer = 0;
@@ -211,6 +215,11 @@ char str[20];
 int avgsamples = 0;
 bool LocalTimeSet = false;
 
+int phasesLastUpdate = 0;
+int32_t IrmsOriginal[3]={0, 0, 0};   
+int homeBatteryCurrent = 0;
+int homeBatteryLastUpdate = 0; // Time in milliseconds
+
 struct EMstruct EMConfig[EM_CUSTOM + 1] = {
     /* DESC,      ENDIANNESS,      FCT, DATATYPE,            U_REG,DIV, I_REG,DIV, P_REG,DIV, E_REG,DIV */
     {"Disabled",  ENDIANESS_LBF_LWF, 0, MB_DATATYPE_INT32,        0, 0,      0, 0,      0, 0,      0, 0}, // First entry!
@@ -221,6 +230,7 @@ struct EMstruct EMConfig[EM_CUSTOM + 1] = {
     {"ABB",       ENDIANESS_HBF_HWF, 3, MB_DATATYPE_INT32,   0x5B00, 1, 0x5B0C, 2, 0x5B14, 2, 0x5002, 2}, // ABB B23 212-100 (0.1V / 0.01A / 0.01W / 0.01kWh) RS485 wiring reversed / max read count 125
     {"SolarEdge", ENDIANESS_HBF_HWF, 3, MB_DATATYPE_INT16,    40196, 0,  40191, 0,  40083, 0,  40226, 3}, // SolarEdge SunSpec (0.01V (16bit) / 0.1A (16bit) / 1W  (16bit) / 1 Wh (32bit))
     {"WAGO",      ENDIANESS_HBF_HWF, 3, MB_DATATYPE_FLOAT32, 0x5002, 0, 0x500C, 0, 0x5012, 3, 0x6000, 0}, // WAGO 879-30x0 (V / A / kW / kWh)
+    {"API",       ENDIANESS_HBF_HWF, 3, MB_DATATYPE_FLOAT32, 0x5002, 0, 0x500C, 0, 0x5012, 3, 0x6000, 0}, // WAGO 879-30x0 (V / A / kW / kWh)
     {"Custom",    ENDIANESS_LBF_LWF, 4, MB_DATATYPE_INT32,        0, 0,      0, 0,      0, 0,      0, 0}  // Last entry!
 };
 
@@ -301,7 +311,7 @@ void IRAM_ATTR onTimerA() {
 //
 // Task is called every 10ms
 void BlinkLed(void * parameter) {
-    uint8_t BacklightSet = 0, LcdPwm = 0;
+    uint8_t LcdPwm = 0;
     uint8_t RedPwm = 0, GreenPwm = 0, BluePwm = 0;
     uint8_t LedCount = 0;                                                   // Raw Counter before being converted to PWM value
     unsigned int LedPwm = 0;                                                // PWM value 0-255
@@ -395,7 +405,6 @@ void BlinkLed(void * parameter) {
 // Set Charge Current 
 // Current in Amps * 10 (160 = 16A)
 void SetCurrent(uint16_t current) {
-
     uint32_t DutyCycle;
 
     if ((current >= 60) && (current <= 510)) DutyCycle = current / 0.6;
@@ -468,8 +477,8 @@ uint8_t Pilot() {
     for (n=0 ; n<25 ;n++) {
         sample = ADCsamples[n];
         voltage = esp_adc_cal_raw_to_voltage( sample, adc_chars_CP);        // convert adc reading to voltage
-        if (sample < Min) Min = voltage;                                    // store lowest value
-        if (sample > Max) Max = voltage;                                    // store highest value
+        if (voltage < Min) Min = voltage;                                   // store lowest value
+        if (voltage > Max) Max = voltage;                                   // store highest value
     }    
     //Serial.printf("min:%u max:%u\n",Min ,Max);
 
@@ -512,6 +521,16 @@ const char * getErrorNameWeb(uint8_t ErrorCode) {
     else return "Multiple Errors";
 }
 
+uint8_t getErrorId(uint8_t ErrorCode) {
+    uint8_t count = 0;
+    //find the error bit that is set
+    while (ErrorCode) {
+        count++;
+        ErrorCode = ErrorCode >> 1;
+    }    
+    return count;
+}
+
 
 
 /**
@@ -536,17 +555,20 @@ void setSolarStopTimer(uint16_t Timer) {
     SolarStopTimer = Timer;
 }
 
-
 void setState(uint8_t NewState) {
+    setState(NewState, false);
+}
 
-    if (State != NewState) {
+void setState(uint8_t NewState, bool forceState) {
+
+    if (State != NewState || forceState) {
         
         char Str[50];
         snprintf(Str, 50, "#%02d:%02d:%02d STATE %s -> %s\n",timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, getStateName(State), getStateName(NewState) ); 
 
 #ifdef LOG_DEBUG_EVSE
         // Log State change to webpage
-        ws.textAll(Str);    
+        // ws.textAll(Str);    
 #endif                
         Serial.print(Str+1);
     }
@@ -578,8 +600,9 @@ void setState(uint8_t NewState) {
             break;      
         case STATE_C:                                                           // State C2
             ActivationMode = 255;                                               // Disable ActivationMode
-            CONTACTOR1_ON;                                                      // Contactor1 ON
-            CONTACTOR2_ON;                                                      // Contactor2 ON
+            CONTACTOR1_ON;      
+            if(Mode == MODE_NORMAL && enable3f)                                 // Contactor1 ON
+                CONTACTOR2_ON;                                                  // Contactor2 ON
             LCDTimer = 0;
             break;
         case STATE_C1:
@@ -596,7 +619,7 @@ void setState(uint8_t NewState) {
     BalancedState[0] = NewState;
     State = NewState;
 
-    BacklightTimer = BACKLIGHT;                                                 // Backlight ON
+    // BacklightTimer = BACKLIGHT;                                                 // Backlight ON
 }
 
 void setAccess(bool Access) {
@@ -607,6 +630,31 @@ void setAccess(bool Access) {
     }
 }
 
+/**
+ * Returns the known battery charge rate if the data is not too old.
+ * Returns 0 if data is too old.
+ * A positive number means charging, a negative number means discharging --> this means the inverse must be used for calculations
+ * 
+ * Example:
+ * homeBatteryCharge == 1000 --> Battery is charging using Solar
+ * P1 = -500 --> Solar injection to the net but nut sufficient for charging
+ * 
+ * If the P1 value is added with the inverse battery charge it will inform the EVSE logic there is enough Solar --> -500 + -1000 = -1500
+ * 
+ * Note: The user who is posting battery charge data should take this into account, meaning: if he wants a minimum home battery (dis)charge rate he should substract this from the value he is sending.
+ */
+// 
+int getBatteryCurrent(void) {
+    int currentTime = time(NULL) - 60; // The data should not be older than 1 minute
+    
+    if (Mode == MODE_SOLAR && homeBatteryLastUpdate > (currentTime)) {
+        return homeBatteryCurrent;
+    } else {
+        homeBatteryCurrent = 0;
+        homeBatteryLastUpdate = 0;
+        return 0;
+    }
+}
 
 
 // Is there at least 6A(configurable MinCurrent) available for a EVSE?
@@ -991,6 +1039,7 @@ uint8_t getMenuItems (void) {
         MenuItems[m++] = MENU_STOP;                                             // - Stop time (min)
         MenuItems[m++] = MENU_IMPORT;                                           // - Import Current from Grid (A)
     }
+    MenuItems[m++] = MENU_3F;
     MenuItems[m++] = MENU_LOADBL;                                               // Load Balance Setting (0:Disable / 1:Master / 2-8:Node)
     if (Mode && LoadBl < 2) {                                                   // ? Mode Smart/Solar and Load Balancing Disabled/Master?
         MenuItems[m++] = MENU_MAINS;                                            // - Max Mains Amps (hard limit, limited by the MAINS connection) (A) (Mode:Smart/Solar)
@@ -1008,7 +1057,7 @@ uint8_t getMenuItems (void) {
     if (Mode) {                                                                 // ? Smart or Solar mode?
         if (LoadBl < 2) {                                                       // - ? Load Balancing Disabled/Master?
             MenuItems[m++] = MENU_MAINSMETER;                                   // - - Type of Mains electric meter (0: Disabled / Constants EM_*)
-            if (MainsMeter == EM_SENSORBOX) {                                   // - - ? Sensorbox?
+            if (MainsMeter == EM_SENSORBOX || MainsMeter == EM_API) {                                   // - - ? Sensorbox?
                 if (GridActive == 1) MenuItems[m++] = MENU_GRID;
                 if (CalActive == 1) MenuItems[m++] = MENU_CAL;                  // - - - Sensorbox CT measurement calibration
             } else if(MainsMeter) {                                             // - - ? Other?
@@ -1060,6 +1109,9 @@ uint8_t setItemValue(uint8_t nav, uint16_t val) {
     }
 
     switch (nav) {
+        case MENU_3F:
+            enable3f = val == 1;
+            break;
         case MENU_CONFIG:
             Config = val;
             break;
@@ -1189,6 +1241,7 @@ uint8_t setItemValue(uint8_t nav, uint16_t val) {
             break;
         case STATUS_CURRENT:
             OverrideCurrent = val;
+            timeout = 10;                                                       // reset timeout when register is written
             break;
         case STATUS_SOLAR_TIMER:
             setSolarStopTimer(val);
@@ -1217,6 +1270,8 @@ uint8_t setItemValue(uint8_t nav, uint16_t val) {
  */
 uint16_t getItemValue(uint8_t nav) {
     switch (nav) {
+        case MENU_3F:
+            return enable3f;
         case MENU_CONFIG:
             return Config;
         case MENU_MODE:
@@ -1329,6 +1384,8 @@ const char * getMenuItemOption(uint8_t nav) {
     value = getItemValue(nav);
 
     switch (nav) {
+        case MENU_3F:
+            return enable3f ? "Yes" : "No";
         case MENU_CONFIG:
             if (Config) return StrFixed;
             else return StrSocket;
@@ -1534,7 +1591,7 @@ void CheckSwitch(void)
                     ErrorFlags &= ~RCM_TRIPPED;
                 }
                 // Also light up the LCD backlight
-                BacklightTimer = BACKLIGHT;                                 // Backlight ON
+                // BacklightTimer = BACKLIGHT;                                 // Backlight ON
 
             } else {
                 // Switch input released
@@ -1974,6 +2031,21 @@ void Timer1S(void * parameter) {
 
     while(1) { // infinite loop
 
+        // Reset data if API data is too old
+        if (MainsMeter == EM_API && phasesLastUpdate < (time(NULL) - 60)) {
+            phasesLastUpdate=0;
+            Irms[0] = 0;
+            Irms[1] = 0;
+            Irms[2] = 0;
+            Isum = 0; 
+            UpdateCurrentData();
+        }
+
+        if (homeBatteryLastUpdate != 0 && homeBatteryLastUpdate < (time(NULL) - 60)) {
+            homeBatteryCurrent = 0;
+            homeBatteryLastUpdate = 0;
+        }
+
         if (BacklightTimer) BacklightTimer--;                               // Decrease backlight counter every second.
 
         // wait for Activation mode to start
@@ -1993,9 +2065,6 @@ void Timer1S(void * parameter) {
                 ChargeTimer = 15;
             }
         }
-
-
-
 
         // once a second, measure temperature
         // range -40 .. +125C
@@ -2052,8 +2121,7 @@ void Timer1S(void * parameter) {
             if (BalancedState[x] == STATE_C) Node[x].Timer++;
         }
 
-        if ((timeout == 0) && !(ErrorFlags & CT_NOCOMM))                    // timeout if CT current measurement takes > 10 secs
-        {
+        if ( (timeout == 0) && !(ErrorFlags & CT_NOCOMM) && MainsMeter != EM_API) { // timeout if CT current measurement takes > 10 secs
             ErrorFlags |= CT_NOCOMM;
             if (State == STATE_C) setState(STATE_C1);                       // tell EV to stop charging
             else setState(STATE_B1);                                        // when we are not charging switch to State B1
@@ -2107,20 +2175,20 @@ void Timer1S(void * parameter) {
           
 
         // this will run every 5 seconds
-        if (Timer5sec++ >= 5) {
-            // Connected to WiFi?
-            if (WiFi.status() == WL_CONNECTED) {
-                ws.printfAll("T:%d",TempEVSE);                              // Send internal temperature to clients 
-                ws.printfAll("S:%s",getStateNameWeb(State));
-                ws.printfAll("E:%s",getErrorNameWeb(ErrorFlags));
-                ws.printfAll("C:%2.1f",(float)Balanced[0]/10);
-                ws.printfAll("I:%3.1f,%3.1f,%3.1f",(float)Irms[0]/10,(float)Irms[1]/10,(float)Irms[2]/10);
-                ws.printfAll("R:%u", esp_reset_reason() );
+        // if (Timer5sec++ >= 5) {
+        //     // Connected to WiFi?
+        //     if (WiFi.status() == WL_CONNECTED) {
+        //         ws.printfAll("T:%d",TempEVSE);                              // Send internal temperature to clients 
+        //         ws.printfAll("S:%s",getStateNameWeb(State));
+        //         ws.printfAll("E:%s",getErrorNameWeb(ErrorFlags));
+        //         ws.printfAll("C:%2.1f",(float)Balanced[0]/10);
+        //         ws.printfAll("I:%3.1f,%3.1f,%3.1f",(float)Irms[0]/10,(float)Irms[1]/10,(float)Irms[2]/10);
+        //         ws.printfAll("R:%u", esp_reset_reason() );
 
-                ws.cleanupClients();                                        // Cleanup old websocket clients
-            } 
-            Timer5sec = 0;
-        }
+        //         ws.cleanupClients();                                        // Cleanup old websocket clients
+        //     } 
+        //     Timer5sec = 0;
+        // }
 
         //Serial.printf("Task 1s free ram: %u\n", uxTaskGetStackHighWaterMark( NULL ));
 
@@ -2196,12 +2264,18 @@ ModbusMessage MBMainsMeterResponse(ModbusMessage request) {
         if (x && LoadBl <2) timeout = 10;                   // only reset timeout when data is ok, and Master/Disabled
 
         // Calculate Isum (for nodes and master)
-        Isum = 0;
+
+        phasesLastUpdate=time(NULL);
+        Isum = 0; 
+        int batteryPerPhase = getBatteryCurrent() / 3; // Divide the battery current per phase to spread evenly
+
         for (x = 0; x < 3; x++) {
             // Calculate difference of Mains and PV electric meter
-            if (PVMeter) CM[x] = CM[x] - PV[x];             // CurrentMeter and PV resolution are 1mA
-            Irms[x] = (signed int)(CM[x] / 100);            // reduce resolution of Irms to 100mA
-            Isum = Isum + Irms[x];                          // Isum has a resolution of 100mA
+            if (PVMeter) CM[x] = CM[x] - PV[x];             // CurrentMeter and PV values are MILLI AMPERE
+            Irms[x] = (signed int)(CM[x] / 100);            // Convert to AMPERE * 10
+            IrmsOriginal[x] = Irms[x];
+            Irms[x] -= batteryPerPhase;           
+            Isum = Isum + Irms[x];                          
         }
     }
 
@@ -2396,6 +2470,8 @@ void MBhandleError(Error error, uint32_t token)
   
 void ConfigureModbusMode(uint8_t newmode) {
 
+    if(MainsMeter == EM_API) return;
+
     Serial.printf("changing LoadBL from %u to %u\n",LoadBl, newmode);
     
     if ((LoadBl < 2 && newmode > 1) || (LoadBl > 1 && newmode < 2) || (newmode == 255) ) {
@@ -2415,7 +2491,7 @@ void ConfigureModbusMode(uint8_t newmode) {
             // Also add handler for all broadcast messages from Master.
             MBserver.registerWorker(BROADCAST_ADR, ANY_FUNCTION_CODE, &MBbroadcast);
 
-            if (MainsMeter) MBserver.registerWorker(MainsMeterAddress, ANY_FUNCTION_CODE, &MBMainsMeterResponse);
+            if (MainsMeter != EM_API) MBserver.registerWorker(MainsMeterAddress, ANY_FUNCTION_CODE, &MBMainsMeterResponse);
             if (EVMeter) MBserver.registerWorker(EVMeterAddress, ANY_FUNCTION_CODE, &MBEVMeterResponse);
             if (PVMeter) MBserver.registerWorker(PVMeterAddress, ANY_FUNCTION_CODE, &MBPVMeterResponse);
 
@@ -2561,6 +2637,8 @@ void read_settings(bool write) {
         EMConfig[EM_CUSTOM].Function = preferences.getUChar("EMFunction",EMCUSTOM_FUNCTION);
         WIFImode = preferences.getUChar("WIFImode",WIFI_MODE);
         APpassword = preferences.getString("APpassword",AP_PASSWORD);
+
+        enable3f = preferences.getUChar("enable3f", false); 
         
         preferences.end();                                  
 
@@ -2613,6 +2691,8 @@ void write_settings(void) {
     preferences.putUChar("WIFImode", WIFImode);
     preferences.putString("APpassword", APpassword);
 
+    preferences.putBool("enable3f", enable3f);
+
     preferences.end();
 
 #ifdef LOG_INFO_EVSE
@@ -2657,18 +2737,17 @@ void WiFiStationGotIp(WiFiEvent_t event, WiFiEventInfo_t info) {
 // WebSockets event handler
 //
 void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type, void * arg, uint8_t *data, size_t len){
-  static uint8_t led = 0;
 
   if (type == WS_EVT_CONNECT) {
     Serial.printf("ws[%s][%u] connect\n", server->url(), client->id());
-    client->printf("Hello Client %u\n", client->id());
-    client->ping();
+    //client->printf("Hello Client %u\n", client->id());
+    //client->ping();                                                               // this will crash the ESP on IOS 15.3.1 / Safari
     //client->text("Hello from ESP32 Server");
 
   } else if (type == WS_EVT_DISCONNECT) {
     Serial.printf("ws[%s][%u] disconnect\n", server->url(), client->id());
   } else if(type == WS_EVT_PONG){
-   Serial.printf("ws[%s][%u] pong[%u]: %s\n", server->url(), client->id(), len, (len)?(char*)data:"");
+//   Serial.printf("ws[%s][%u] pong[%u]: %s\n", server->url(), client->id(), len, (len)?(char*)data:"");
   } else if (type == WS_EVT_DATA){
 
     Serial.println("Data received: ");
@@ -2710,7 +2789,7 @@ void onRequest(AsyncWebServerRequest *request){
 
 
 void StopwebServer(void) {
-    ws.closeAll();
+    // ws.closeAll();
     webServer.end();
 }
 
@@ -2722,24 +2801,19 @@ void StartwebServer(void) {
         request->send(SPIFFS, "/index.html", String(), false, processor);
     });
     // handles compressed .js file from SPIFFS
-    webServer.on("/required.js", HTTP_GET, [](AsyncWebServerRequest *request) {
-        AsyncWebServerResponse *response = request->beginResponse(SPIFFS, "/required.js", "text/javascript");
-        response->addHeader("Content-Encoding", "gzip");
-        request->send(response);
-    });
-    // handles compressed .css file from SPIFFS
-    webServer.on("/required.css", HTTP_GET, [](AsyncWebServerRequest *request) {
-        AsyncWebServerResponse *response = request->beginResponse(SPIFFS, "/required.css", "text/css");
-        response->addHeader("Content-Encoding", "gzip");
-        request->send(response);
-    });
-    
- 
-    webServer.on("/update", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(200, "text/html", "spiffs.bin updates the SPIFFS partition<br>firmware.bin updates the main firmware<br><form method='POST' action='/update' enctype='multipart/form-data'><input type='file' name='update'><input type='submit' value='Update'></form>");
-    });
+    // webServer.on("/required.js", HTTP_GET, [](AsyncWebServerRequest *request) {
+    //     AsyncWebServerResponse *response = request->beginResponse(SPIFFS, "/required.js", "text/javascript");
+    //     response->addHeader("Content-Encoding", "gzip");
+    //     request->send(response);
+    // });
+    // // handles compressed .css file from SPIFFS
+    // webServer.on("/required.css", HTTP_GET, [](AsyncWebServerRequest *request) {
+    //     AsyncWebServerResponse *response = request->beginResponse(SPIFFS, "/required.css", "text/css");
+    //     response->addHeader("Content-Encoding", "gzip");
+    //     request->send(response);
+    // });
 
-    webServer.on("/erasesettings", HTTP_GET, [](AsyncWebServerRequest *request) {
+    webServer.on("/erasesettings", HTTP_DELETE, [](AsyncWebServerRequest *request) {
         request->send(200, "text/plain", "Erasing settings, rebooting");
         if ( preferences.begin("settings", false) ) {         // our own settings
           preferences.clear();
@@ -2750,6 +2824,10 @@ void StartwebServer(void) {
           preferences.end();       
         }
         ESP.restart();
+    });
+
+    webServer.on("/update", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", "spiffs.bin updates the SPIFFS partition<br>firmware.bin updates the main firmware<br><form method='POST' action='/update' enctype='multipart/form-data'><input type='file' name='update'><input type='submit' value='Update'></form>");
     });
 
     webServer.on("/update", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -2786,6 +2864,294 @@ void StartwebServer(void) {
         }
     });
 
+    webServer.on("/settings", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String mode = "N/A";
+        int modeId = -1;
+        if(Access_bit == 0)  {
+            mode = "OFF";
+            modeId=0;
+        } else {
+            switch(Mode) {
+                case MODE_NORMAL: mode = "NORMAL"; modeId=1; break;
+                case MODE_SOLAR: mode = "SOLAR"; modeId=2; break;
+                case MODE_SMART: mode = "SMART"; modeId=3; break;
+            }
+        }
+        String backlight = "N/A";
+        switch(BacklightSet) {
+            case 0: backlight = "OFF"; break;
+            case 1: backlight = "ON"; break;
+            case 2: backlight = "DIMMED"; break;
+        }
+        String evstate = StrStateNameWeb[State];
+        String error = getErrorNameWeb(ErrorFlags);
+        int errorId = getErrorId(ErrorFlags);
+
+        // if(error == "Waiting for Solar") {
+        if(errorId == 6) {
+            evstate += " - " + error;
+            error = "None";
+            errorId = 0;
+        }
+
+        String evConnected = "true";
+        switch(State) {
+            case STATE_A:
+            case NOSTATE: evConnected = "false"; break;
+        }
+
+        DynamicJsonDocument doc(1024); // https://arduinojson.org/v6/assistant/
+        doc["version"] = String(VERSION);
+        doc["mode"] = mode;
+        doc["mode_id"] = modeId;
+        doc["car_connected"] = evConnected;
+        
+        doc["evse"]["temp"] = TempEVSE;
+        doc["evse"]["connected"] = evConnected;
+        doc["evse"]["access"] = Access_bit == 1;
+        doc["evse"]["mode"] = Mode;
+        doc["evse"]["charge_timer"] = ChargeTimer;
+        doc["evse"]["solar_stop_timer"] = SolarStopTimer;
+        doc["evse"]["state"] = evstate;
+        doc["evse"]["state_id"] = State;
+        doc["evse"]["error"] = error;
+        doc["evse"]["error_id"] = errorId;
+
+        if (RFIDReader) {
+            switch(RFIDstatus) {
+                case 0:
+                case 1: doc["evse"]["rfid"] = "Present"; break;
+                case 2: doc["evse"]["rfid"] = "Card Stored"; break;
+                case 3: doc["evse"]["rfid"] = "Card Deleted"; break;
+                case 4: doc["evse"]["rfid"] = "Card already stored"; break;
+                case 5: doc["evse"]["rfid"] = "Card not in storage"; break;
+                case 6: doc["evse"]["rfid"] = "Card Storage full"; break;
+                case 7: doc["evse"]["rfid"] = "Invalid"; break;
+            }
+         } else {
+             doc["evse"]["rfid"] = "Not Installed";
+         }
+
+        doc["settings"]["charge_current"] = Balanced[0];
+        doc["settings"]["override_current"] = OverrideCurrent;
+        doc["settings"]["current_min"] = MinCurrent;
+        doc["settings"]["current_max"] = MaxCurrent;
+        doc["settings"]["current_main"] = MaxMains;
+        doc["settings"]["solar_max_import"] = ImportCurrent;
+        doc["settings"]["solar_start_current"] = StartCurrent;
+        doc["settings"]["solar_stop_time"] = StopTime;
+        doc["settings"]["3phases_enabled"] = enable3f;
+        doc["settings"]["mains_meter"] = EMConfig[MainsMeter].Desc;
+        
+        doc["home_battery"]["current"] = homeBatteryCurrent;
+        doc["home_battery"]["last_update"] = homeBatteryLastUpdate;
+        
+        doc["phase_currents"]["TOTAL"] = Irms[0] + Irms[1] + Irms[2];
+        doc["phase_currents"]["L1"] = Irms[0];
+        doc["phase_currents"]["L2"] = Irms[1];
+        doc["phase_currents"]["L3"] = Irms[2];
+        doc["phase_currents"]["last_data_update"] = phasesLastUpdate;
+        doc["phase_currents"]["original_data"]["TOTAL"] = IrmsOriginal[0] + IrmsOriginal[1] + IrmsOriginal[2];
+        doc["phase_currents"]["original_data"]["L1"] = IrmsOriginal[0];
+        doc["phase_currents"]["original_data"]["L2"] = IrmsOriginal[1];
+        doc["phase_currents"]["original_data"]["L3"] = IrmsOriginal[2];
+        
+        doc["backlight"]["timer"] = BacklightTimer;
+        doc["backlight"]["status"] = backlight;
+
+        String json;
+        serializeJson(doc, json);
+
+        AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+        response->addHeader("Access-Control-Allow-Origin","*"); 
+        request->send(response);
+    });
+
+
+    webServer.on("/settings", HTTP_POST, [](AsyncWebServerRequest *request) {
+        DynamicJsonDocument doc(512); // https://arduinojson.org/v6/assistant/
+
+        if(request->hasParam("backlight")) {
+            String current = request->getParam("backlight")->value();
+            int backlight = current.toInt();
+            ledcWrite(LCD_CHANNEL, backlight);
+            doc["Backlight"] = backlight;
+        }
+
+        if(request->hasParam("disable_override_current")) {
+            OverrideCurrent = 0;
+            doc["disable_override_current"] = "OK";
+        }
+
+        if(request->hasParam("mode")) {
+            String mode = request->getParam("mode")->value();
+            switch(mode.toInt()) {
+                case 0: // OFF
+                    setAccess(0);
+                    break;
+                case 1:
+                    setAccess(1);
+                    setMode(MODE_NORMAL);
+                    break;
+                case 2:
+                    OverrideCurrent = 0;
+                    setAccess(1);
+                    setMode(MODE_SOLAR);
+                    break;
+                case 3:
+                    OverrideCurrent = 0;
+                    setAccess(1);
+                    setMode(MODE_SMART);
+                    break;
+                default:
+                    mode: "Value not allowed!";
+            }
+            doc["mode"] = mode;
+        }
+
+        if(request->hasParam("enable_3phases")) {
+            String enabled = request->getParam("enable_3phases")->value();
+            if(enabled.equalsIgnoreCase("true")) {
+                enable3f = true;
+                doc["enable_3phases"] = true;
+            } else {
+                enable3f = false;
+                doc["enable_3phases"] = false;
+            }
+            write_settings();
+        }
+
+        if(Mode == MODE_NORMAL) {
+            if(request->hasParam("override_current")) {
+                String current = request->getParam("override_current")->value();
+                if(current.toInt() >= ( MinCurrent * 10 ) && current.toInt() <= ( MaxCurrent * 10 )) {
+                    OverrideCurrent = current.toInt();
+                    doc["override_current"] = OverrideCurrent;
+                } else {
+                    doc["override_current"] = "Value not allowed!";
+                }
+            }
+
+            // if(request->hasParam("force_contactors")) {
+            //     String force_contactors = request->getParam("force_contactors")->value();
+            //     if(force_contactors.equalsIgnoreCase("true")) {
+            //         setState(State, true);
+            //         doc["force_contactors"] = "OK";
+            //     }
+            // }
+        }
+
+        String json;
+        serializeJson(doc, json);
+
+        request->send(200, "application/json", json);
+    },[](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final){
+    });
+
+    webServer.on("/currents", HTTP_POST, [](AsyncWebServerRequest *request) {
+        DynamicJsonDocument doc(200);
+
+        if(request->hasParam("battery_current")) {
+            String value = request->getParam("battery_current")->value();
+            homeBatteryCurrent = value.toInt();
+            homeBatteryLastUpdate = time(NULL);
+            doc["battery_current"] = homeBatteryCurrent;
+        }
+
+        if(MainsMeter == EM_API) {
+            if(request->hasParam("L1") && request->hasParam("L2") && request->hasParam("L3")) {
+                phasesLastUpdate = time(NULL);
+
+                Irms[0] = request->getParam("L1")->value().toInt();
+                Irms[1] = request->getParam("L2")->value().toInt();
+                Irms[2] = request->getParam("L3")->value().toInt();
+
+                int batteryPerPhase = getBatteryCurrent() / 3;
+                Isum = 0; 
+                for (int x = 0; x < 3; x++) {  
+                    IrmsOriginal[x] = Irms[x];
+                    doc["original"]["L" + x] = Irms[x];
+                    Irms[x] -= batteryPerPhase;           
+                    doc["L" + x] = Irms[x];
+                    Isum = Isum + Irms[x];
+                }
+                doc["TOTAL"] = Isum;
+                UpdateCurrentData();
+            }
+        }
+
+        String json;
+        serializeJson(doc, json);
+        request->send(200, "application/json", json);
+
+    },[](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final){
+    });
+
+    webServer.on("/reboot", HTTP_POST, [](AsyncWebServerRequest *request) {
+        DynamicJsonDocument doc(200);
+
+        ESP.restart();
+        doc["reboot"] = true;
+
+        String json;
+        serializeJson(doc, json);
+        request->send(200, "application/json", json);
+
+    },[](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final){
+    });
+
+    webServer.on("/currents", HTTP_POST, [](AsyncWebServerRequest *request) {
+        DynamicJsonDocument doc(200);
+
+        if(request->hasParam("battery_current")) {
+            String value = request->getParam("battery_current")->value();
+            homeBatteryCurrent = value.toInt();
+            homeBatteryLastUpdate = time(NULL);
+            doc["battery_current"] = homeBatteryCurrent;
+        }
+
+        if(MainsMeter == EM_API) {
+            if(request->hasParam("L1") && request->hasParam("L2") && request->hasParam("L3")) {
+                phasesLastUpdate = time(NULL);
+
+                Irms[0] = request->getParam("L1")->value().toInt();
+                Irms[1] = request->getParam("L2")->value().toInt();
+                Irms[2] = request->getParam("L3")->value().toInt();
+
+                int batteryPerPhase = getBatteryCurrent() / 3;
+                Isum = 0; 
+                for (int x = 0; x < 3; x++) {  
+                    IrmsOriginal[x] = Irms[x];
+                    doc["original"]["L" + x] = Irms[x];
+                    Irms[x] -= batteryPerPhase;           
+                    doc["L" + x] = Irms[x];
+                    Isum = Isum + Irms[x];
+                }
+                doc["TOTAL"] = Isum;
+                UpdateCurrentData();
+            }
+        }
+
+        String json;
+        serializeJson(doc, json);
+        request->send(200, "application/json", json);
+
+    },[](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final){
+    });
+
+    webServer.on("/reboot", HTTP_POST, [](AsyncWebServerRequest *request) {
+        DynamicJsonDocument doc(200);
+
+        ESP.restart();
+        doc["reboot"] = true;
+
+        String json;
+        serializeJson(doc, json);
+        request->send(200, "application/json", json);
+
+    },[](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final){
+    });
+
     // attach filesystem root at URL /
     webServer.serveStatic("/", SPIFFS, "/");
 
@@ -2793,8 +3159,8 @@ void StartwebServer(void) {
     webServer.onNotFound(onRequest);
 
     // setup websockets handler 'onWsEvent'
-    ws.onEvent(onWsEvent);
-    webServer.addHandler(&ws);
+    // ws.onEvent(onWsEvent);
+    // webServer.addHandler(&ws);
     
     // Setup async webserver
     webServer.begin();
@@ -2825,9 +3191,12 @@ void WiFiSetup(void) {
         Serial.print(APhostname);
         Serial.print(".local\n");
     }
+
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(true);
         
     // On disconnect Event, call function
-    WiFi.onEvent(WiFiStationDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);    
+    //WiFi.onEvent(WiFiStationDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);    
     // On IP, call function
     WiFi.onEvent(WiFiStationGotIp, ARDUINO_EVENT_WIFI_STA_GOT_IP);  // arduino 2.x
     //
@@ -2856,7 +3225,7 @@ void SetupNetworkTask(void * parameter) {
     LocalTimeSet = getLocalTime(&timeinfo, 1000U);
     
     // Cleanup old websocket clients
-    ws.cleanupClients();
+    // ws.cleanupClients();
 
     if (WIFImode == 2 && LCDTimer > 10 && WiFi.getMode() != WIFI_AP_STA) {
         Serial.print("Start Portal...\n");
@@ -2977,7 +3346,8 @@ void setup() {
 
     // attach the channels to the GPIO to be controlled
     ledcAttachPin(PIN_CP_OUT, CP_CHANNEL);      
-    pinMode(PIN_CP_OUT, OUTPUT);                // Re-init the pin to output, required in order for attachInterrupt to work (2.0.2)
+    //pinMode(PIN_CP_OUT, OUTPUT);                // Re-init the pin to output, required in order for attachInterrupt to work (2.0.2)
+                                                // not required/working on master branch..
                                                 // see https://github.com/espressif/arduino-esp32/issues/6140
     ledcAttachPin(PIN_LEDR, RED_CHANNEL);
     ledcAttachPin(PIN_LEDG, GREEN_CHANNEL);

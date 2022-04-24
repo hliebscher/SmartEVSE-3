@@ -421,7 +421,7 @@ void GLCD(void) {
             if (WIFImode == 1 ) {   // Wifi Enabled
 
                 if (WiFi.status() == WL_CONNECTED) {
-                    sprintf(Str, "%u.%u.%u.%u",localIp[0],localIp[1],localIp[2],localIp[3]);
+                    sprintf(Str, "%u.%u.%u.%u %i%cC",localIp[0],localIp[1],localIp[2],localIp[3],TempEVSE, 0x0C);
                     GLCD_write_buf_str(0,0, Str, GLCD_ALIGN_LEFT);
                     if (LocalTimeSet) sprintf(Str, "%02u:%02u",timeinfo.tm_hour, timeinfo.tm_min);
                     else sprintf(Str, "--:--");
@@ -461,7 +461,7 @@ void GLCD(void) {
     }
 
     if (ErrorFlags) {                                                           // We switch backlight on, as we exit after displaying the error
-        BacklightTimer = BACKLIGHT;                                             // Backlight timer is set to 60 seconds
+        // BacklightTimer = BACKLIGHT;                                             // Backlight timer is set to 60 seconds
 
         if (ErrorFlags & CT_NOCOMM) {                                           // No serial communication for 10 seconds
             GLCD_print_buf2(0, (const char *) "ERROR NO");
@@ -529,7 +529,7 @@ void GLCD(void) {
                 GLCD_print_buf2(2, (const char *) "READY TO");
                 sprintf(Str, "CHARGE %u", ChargeDelay);
                 if (ChargeDelay) {
-                    BacklightTimer = BACKLIGHT;
+                    // BacklightTimer = BACKLIGHT;
                 } else Str[6] = '\0';
                 GLCD_print_buf2(4, Str);
             } else {
@@ -647,7 +647,7 @@ void GLCD(void) {
         } else if (State != STATE_C) {
             sprintf(Str, "READY %u", ChargeDelay);
             if (ChargeDelay) {
-                BacklightTimer = BACKLIGHT;
+                // BacklightTimer = BACKLIGHT;
             } else Str[5] = '\0';
             GLCD_print_buf2(5, Str);
         } else if (State == STATE_C) {
@@ -842,11 +842,9 @@ void GLCDMenu(uint8_t Buttons) {
 
             // Bottom row of the GLCD
             GLCD_buffer_clr();
-            sprintf(Str, "%i%cC", TempEVSE, 0x0C);                              // ° Degree symbol
-            GLCD_write_buf_str(6, 0, Str, GLCD_ALIGN_LEFT);                     // show the internal temperature
-            sprintf(Str, "%u/%u", GetPosInMenu(MenuItemsCount), MenuItemsCount);
-            GLCD_write_buf_str(64, 0, Str, GLCD_ALIGN_CENTER);                  // show navigation position in the menu
-            GLCD_write_buf_str(122, 0, (const char *) "v" VERSION, GLCD_ALIGN_RIGHT);// show software version in bottom right corner.
+            GLCD_write_buf_str(0, 0, (const char *) VERSION, GLCD_ALIGN_LEFT);// show software version in bottom right corner.
+            sprintf(Str, "%u/%u", GetPosInMenu(MenuItemsCount), MenuItemsCount);                              // ° Degree symbol
+            GLCD_write_buf_str(122, 0, Str, GLCD_ALIGN_RIGHT);                     // show the internal temperature
             GLCD_sendbuf(7, 1);
         }
         ButtonRelease = 2;                                                      // Set value to 2, so that LCD will be updated only once
